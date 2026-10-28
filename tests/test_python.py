@@ -179,6 +179,9 @@ def test_build_writes_index_prices_and_fx(monkeypatch, tmp_path):
     index = strict_json((tmp_path / "data" / "index.json").read_text(encoding="utf-8"))
     assert [t["label"] for t in index["tickers"]] == [None, "삼성전자"]
     assert index["tickers"][0]["name"] == "Invesco QQQ Trust"
+    # 종목 목록용 요약: 1.0 → 2.0(고점) → 1.5 이면 현재 -25%
+    assert index["tickers"][0]["last_close"] == 1.5
+    assert index["tickers"][0]["dd"] == -0.25
     assert index["fx"] == {"USD": "fx/USD.json"}
     assert (tmp_path / "data" / "QQQ.json").exists()
     assert (tmp_path / "data" / "005930.KS.json").exists()

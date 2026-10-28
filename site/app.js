@@ -8,12 +8,8 @@
   const MODE = window.MDD_MODE === 'api' ? 'api' : 'static';
 
   const API_EXAMPLES = [
-    { code: 'QQQ', label: 'QQQ' },
-    { code: 'SPY', label: 'SPY' },
-    { code: 'SOXX', label: 'SOXX' },
-    { code: '005930', label: '삼성전자' },
-    { code: 'BTCUSD', label: '비트코인' },
-    { code: 'GCW00', label: '금' },
+    { code: 'QQQ' }, { code: 'SPY' }, { code: 'SOXX' },
+    { code: '005930', label: '삼성전자' }, { code: 'BTCUSD', label: '비트코인' }, { code: 'GCW00', label: '금' },
   ];
   // 회복률 기준을 80%로 두는 유형 (나머지는 90%)
   const LOW_BASE_TYPES = new Set(['ETF', 'INDEX', 'MUTUALFUND']);
@@ -23,11 +19,14 @@
     FUTURE: '선물', MUTUALFUND: '펀드', CURRENCY: '환율',
   };
   const EPISODE_MIN_DEPTH = -0.10;
+  const YEARLY_CAP = 8;
+  const MINUS = '−';
 
   const state = {
     catalog: null, // static 모드의 data/index.json
     raw: null, // 지금 보고 있는 종목의 가격
-    fx: null, // 그 종목 통화의 원화 환율
+    code: '', // 지금 보고 있는 종목의 입력 코드
+    fx: null,
     views: null,
     viewsKey: '',
     view: 'native',
@@ -35,6 +34,10 @@
     preset: 0,
     req: 0,
     statusKind: '',
+    extra: [], // api 모드에서 검색해 본 종목
+    ddByCode: {}, // api 모드: 불러온 종목의 현재 하락률
+    showAllEpisodes: false,
+    showAllYears: false,
   };
   const cache = new Map();
   let chart = null;
@@ -60,12 +63,13 @@
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const norm = (s) => String(s || '').replace(/\s+/g, '').toUpperCase();
 
+  // 음수에는 진짜 빼기 기호(−)를 쓴다
   function pct(v, digits = 1) {
     if (v == null || !Number.isFinite(v)) return '–';
-    let s = (v * 100).toFixed(digits);
-    if (/^-0\.?0*$/.test(s)) s = s.slice(1);
-    return s + '%';
+    const s = Math.abs(v * 100).toFixed(digits);
+    return (v < 0 && Number(s) !== 0 ? MINUS : '') + s + '%';
   }
+  const signedPct = (v, digits = 1) => (v > 0 && Number((v * 100).toFixed(digits)) !== 0 ? '+' : '') + pct(v, digits);
 
   function money(v, cur) {
     if (v == null || !Number.isFinite(v)) return '–';
@@ -84,15 +88,24 @@
   const int = (n) => Number(n).toLocaleString('ko-KR');
   const fmtDay = (day) => (day == null ? '–' : MDD.dayToISO(day).replaceAll('-', '.'));
 
-  function span(days) {
-    if (days == null) return '–';
-    if (days < 31) return `${days}일`;
+  // 기간: 문자열('16년 5개월')과, 단위를 작게 쓴 노드 둘 다 만든다
+  function spanParts(days) {
+    if (days == null) return null;
+    if (days < 31) return [[days, '일']];
     const months = Math.round(days / 30.44);
-    if (months < 12) return `${months}개월`;
+    if (months < 12) return [[months, '개월']];
     const y = Math.floor(months / 12);
     const m = months % 12;
-    return m ? `${y}년 ${m}개월` : `${y}년`;
+    return m ? [[y, '년'], [m, '개월']] : [[y, '년']];
   }
+  const span = (days) => {
+    const p = spanParts(days);
+    return p ? p.map(([n, u]) => `${n}${u}`).join(' ') : '–';
+  };
+  const spanNode = (days) => {
+    const p = spanParts(days);
+    return p ? p.flatMap(([n, u]) => [String(n), el('small', { text: u })]) : ['–'];
+  };
 
   function localISO(date) {
     const y = date.getFullYear();
@@ -107,8 +120,10 @@
 
   // kind: 'info' | 'error' | 'compute'(기간 설정 오류 — 설정을 고치면 저절로 지운다)
   function setStatus(text, kind = 'info') {
-    $('status').textContent = text;
-    $('status').classList.toggle('error', !!text && kind !== 'info');
+    const box = $('status');
+    box.textContent = text;
+    box.hidden = !text;
+    box.classList.toggle('error', !!text && kind !== 'info');
     state.statusKind = text ? kind : '';
   }
 
@@ -148,20 +163,25 @@
     return cache.get(key);
   }
 
+  function entries() {
+    if (MODE === 'static') return (state.catalog && state.catalog.tickers) || [];
+    const seen = new Set(API_EXAMPLES.map((e) => norm(e.code)));
+    return [...API_EXAMPLES, ...state.extra.filter((e) => !seen.has(norm(e.code)))];
+  }
+
   function findEntry(query) {
     const q = norm(query);
-    const list = (state.catalog && state.catalog.tickers) || [];
-    return list.find((e) => [e.code, e.symbol, e.label, e.name].some((v) => norm(v) === q)) || null;
+    return entries().find((e) => [e.code, e.symbol, e.label, e.name].some((v) => v && norm(v) === q)) || null;
   }
 
   async function getPrices(query) {
     if (MODE === 'api') {
-      return cached(`p:${norm(query)}`, () => getJSON(`api/prices?q=${encodeURIComponent(query)}`));
+      const prices = await cached(`p:${norm(query)}`, () => getJSON(`api/prices?q=${encodeURIComponent(query)}`));
+      const known = findEntry(query);
+      return { ...prices, label: known ? known.label : null, code: known ? known.code : query.trim().toUpperCase() };
     }
     const entry = findEntry(query);
-    if (!entry) {
-      throw new Error(`'${query}'는 이 사이트 종목 목록에 없어요. 아래 목록에서 골라 주세요.`);
-    }
+    if (!entry) throw new Error(`'${query}'는 이 사이트 종목 목록에 없어요. 종목 목록에서 골라 주세요.`);
     const prices = await cached(`p:${entry.file}`, () => getJSON(`data/${entry.file}`));
     return { ...prices, label: entry.label, code: entry.code };
   }
@@ -185,19 +205,15 @@
     try {
       state.catalog = await getJSON('data/index.json');
     } catch (err) {
-      const missing = err.status === 404;
-      throw new Error(missing
+      throw new Error(err.status === 404
         ? '아직 데이터가 없어요. python scripts/build_data.py 를 실행하거나, GitHub Actions 배포가 끝났는지 확인해 주세요.'
         : err.message);
     }
   }
 
-  async function load() {
-    const q = $('q').value.trim();
-    if (!q) {
-      setStatus('종목코드를 입력해 주세요.', 'error');
-      return;
-    }
+  async function load(query) {
+    const q = String(query || '').trim();
+    if (!q) return;
     const my = ++state.req;
     setStatus(`${q.toUpperCase()} 불러오는 중…`);
     document.body.classList.add('loading');
@@ -207,9 +223,13 @@
       if (my !== state.req) return;
 
       state.raw = raw;
+      state.code = raw.code;
       state.fx = fx;
       state.viewsKey = '';
+      state.showAllEpisodes = false;
+      state.showAllYears = false;
       if (!state.baseTouched) $('base').value = LOW_BASE_TYPES.has(raw.type) ? 80 : 90;
+      if (MODE === 'api') rememberApiTicker(raw);
       updateUrl();
       setStatus('');
       render();
@@ -221,8 +241,18 @@
     }
   }
 
+  // api 모드: 검색해 본 종목을 목록에 남기고, 전체 기간 고점 대비 하락률을 표시한다
+  function rememberApiTicker(raw) {
+    const key = norm(raw.code);
+    if (!findEntry(raw.code)) state.extra.push({ code: raw.code, name: raw.name });
+    let peak = 0;
+    for (const v of raw.close) if (v > peak) peak = v;
+    state.ddByCode[key] = raw.close[raw.close.length - 1] / peak - 1;
+    renderWatchlist();
+  }
+
   function updateUrl() {
-    const params = new URLSearchParams({ q: $('q').value.trim() });
+    const params = new URLSearchParams({ q: state.code });
     if ($('start').value) params.set('start', $('start').value);
     if ($('end').value) params.set('end', $('end').value);
     if ($('adjusted').checked) params.set('adjusted', '1');
@@ -308,13 +338,14 @@
 
     $('result').hidden = false;
     renderControls(views);
-    renderHeadline(views, view, cur);
-    renderTiles(view.summary, cur, buy, base);
-    renderLevels(view.summary, cur, thresholds, buy);
+    renderTitle(views, view, cur);
+    renderKpis(view.summary, cur);
+    renderLevels(view, cur, thresholds, buy, base);
     renderChart(view, cur, thresholds, buy);
-    renderDistribution(view, base, buy);
-    renderEpisodes(view);
+    const ladderRows = renderLadder(view, cur, base, buy);
+    renderEpisodes(view, ladderRows);
     renderYearly(view, cur);
+    markWatch();
   }
 
   function renderControls(views) {
@@ -329,102 +360,100 @@
         b.title = views.krw ? '' : (views.krwNote || '원화 기준을 계산할 수 없어요.');
       }
     }
-
     const adj = $('adjusted');
     adj.disabled = !raw.adj;
     adj.closest('label').title = raw.adj ? '' : '이 종목은 배당 반영 가격이 종가와 같아요.';
-
-    const typeName = TYPE_NAMES[raw.type] || raw.type || '알 수 없음';
-    $('base-hint').textContent = state.baseTouched
-      ? 'ETF·지수 80%, 개별종목 90% 권장'
-      : `유형: ${typeName} → 기본 ${LOW_BASE_TYPES.has(raw.type) ? 80 : 90}%`;
   }
 
-  function renderHeadline(views, view, cur) {
+  function renderTitle(views, view, cur) {
     const raw = state.raw;
     const s = view.summary;
     const title = raw.label || raw.name;
     $('name').textContent = title;
+    document.title = `${title} · MDD 분석기`;
+
     const parts = [
       title !== raw.name ? raw.name : null,
       raw.symbol,
       TYPE_NAMES[raw.type] || raw.type,
-      `${fmtDay(s.first_day)} ~ ${fmtDay(s.last_day)}`,
-      `${int(s.days)}거래일`,
-      `${CURRENCY_NAMES[cur] || cur} 기준`,
-      views.adjusted ? '수정주가' : null,
+      `${fmtDay(s.first_day)} ~ ${fmtDay(s.last_day)} · ${int(s.days)}거래일`,
+      `${CURRENCY_NAMES[cur] || cur} 기준${views.adjusted ? ' · 배당 반영' : ''}`,
     ].filter(Boolean);
     $('symbol-meta').textContent = parts.join(' · ');
 
-    $('hero').textContent = pct(s.current_dd);
-    const text = $('hero-text');
-    text.replaceChildren();
+    // 이 화면의 발견: 지금 위치와, 그게 역사적으로 얼마나 흔한지
+    const f = $('finding');
+    f.replaceChildren();
+    const since = `${fmtDay(s.first_day)} 이후 거래일의 `;
     if (s.current_dd > -0.0005) {
-      text.append('지금이 조회 기간의 최고가예요. ',
-        `조회 기간 ${int(s.days)}거래일 중 `, el('strong', { text: pct(s.deeper_than_now_pct) }),
-        '는 지금보다 아래에 있었어요.');
+      f.append('지금이 조회 기간의 최고가예요. ', since, el('strong', { text: pct(s.deeper_than_now_pct) }), '는 지금보다 아래에 있었어요.');
     } else {
-      text.append(
-        `최고가 ${money(s.ath, cur)} (${fmtDay(s.ath_day)})보다 `,
-        el('strong', { text: pct(-s.current_dd) }), ' 아래예요. ',
-        `조회 기간 ${int(s.days)}거래일 중 `, el('strong', { text: pct(s.deeper_than_now_pct) }),
-        '는 지금보다 더 깊이 빠져 있었어요.',
+      f.append(
+        `최고가 ${money(s.ath, cur)}(${fmtDay(s.ath_day)})보다 `, el('strong', { text: pct(-s.current_dd) }), ' 아래예요. ',
+        since, el('strong', { text: pct(s.deeper_than_now_pct) }), '는 지금보다 깊이 빠져 있었어요.',
       );
     }
-
     const note = state.view === 'krw' || !views.krw ? views.krwNote : null;
-    $('krw-note').hidden = !note;
-    $('krw-note').textContent = note || '';
+    if (note) f.append(el('br'), note);
   }
 
-  function tile(label, value, sub) {
-    return el('div', { class: 'tile' },
-      el('div', { class: 'tile-label', text: label }),
-      el('div', { class: 'tile-value', text: value }),
-      sub ? el('div', { class: 'tile-sub', text: sub }) : null);
+  function kpi(label, value, sub, opts = {}) {
+    return el('div', { class: opts.lead ? 'kpi lead' : 'kpi' },
+      el('div', { class: 'kpi-label', text: label }),
+      el('div', { class: opts.money ? 'kpi-value money' : 'kpi-value' }, value),
+      sub ? el('div', { class: 'kpi-sub', text: sub }) : null);
   }
 
-  function renderTiles(s, cur, buy, base) {
+  function renderKpis(s, cur) {
     const longest = s.longest;
-    $('tiles').replaceChildren(
-      tile('현재가', money(s.last_close, cur), fmtDay(s.last_day)),
-      tile('과거 최고가', money(s.ath, cur), fmtDay(s.ath_day)),
-      tile('최대 하락 (MDD)', pct(s.mdd), `${fmtDay(s.mdd_peak_day)} → ${fmtDay(s.mdd_day)}`),
-      tile('평균 하락률', pct(s.avg_dd), '매일의 고점 대비 하락률 평균'),
+    $('kpis').replaceChildren(
+      kpi('고점 대비 현재', pct(s.current_dd), `최고가 ${money(s.ath, cur)} · ${fmtDay(s.ath_day)}`, { lead: true }),
+      kpi('현재가', money(s.last_close, cur), `${fmtDay(s.last_day)} 종가`, { money: true }),
+      kpi('최대 하락', pct(s.mdd), `${fmtDay(s.mdd_peak_day)} → ${fmtDay(s.mdd_day)}`),
+      kpi('평균 하락률', pct(s.avg_dd), '매일의 고점 대비 하락률 평균'),
       longest
-        ? tile('최장 하락 기간', span(longest.calendar_days),
-          `${fmtDay(longest.peak_day)} ~ ${longest.recovered ? fmtDay(longest.recovery_day) : '아직 회복 중'}`)
-        : tile('최장 하락 기간', '없음', '조회 기간 내내 최고가를 경신했어요'),
-      tile('저점매수 구간', buy ? `${buy.level}%` : '–',
-        buy ? `회복률 ${pct(buy.cum_pct)} · 기준 ${pct(base, 0)} 첫 돌파` : ''),
+        ? kpi('최장 하락 기간', spanNode(longest.calendar_days),
+          `${fmtDay(longest.peak_day)} ~ ${longest.recovered ? fmtDay(longest.recovery_day) : '회복 중'}`)
+        : kpi('최장 하락 기간', '–', '조회 기간 내내 최고가를 경신했어요'),
     );
   }
 
-  function renderLevels(s, cur, thresholds, buy) {
-    const items = thresholds.map((t) => ({ ...t, buy: false }));
-    if (buy) items.push({ name: '저점매수', level: buy.level / 100, buy: true });
+  function fillLevel(row, s, cur, level, extra) {
+    const price = s.ath * (1 + level);
+    const reached = s.current_dd <= level + 1e-12;
+    const progress = level < 0 ? clamp(s.current_dd / level, 0, 1) : 1;
+    row.querySelector('[data-role="price"]').textContent = money(price, cur);
+    row.querySelector('[data-role="fill"]').style.width = `${(progress * 100).toFixed(1)}%`;
+    const sub = row.querySelector('[data-role="sub"]');
+    sub.replaceChildren();
+    if (extra) sub.append(extra, ' · ');
+    if (reached) sub.append(el('span', { class: 'reached', text: '도달' }), ' · 현재가가 이 가격 이하예요');
+    else sub.append(`현재가보다 ${pct(1 - price / s.last_close)} 아래`);
+  }
 
-    $('levels').replaceChildren(...items.map((item) => {
-      const price = s.ath * (1 + item.level);
-      const reached = s.last_close <= price;
-      const gap = price / s.last_close - 1;
-      return el('div', { class: item.buy ? 'level buy' : 'level' },
-        el('div', { class: 'level-head' },
-          el('span', { class: item.buy ? 'key accent' : 'key', 'aria-hidden': 'true' }),
-          `${item.name} ${pct(item.level, 0)}`),
-        el('div', { class: 'level-price', text: money(price, cur) }),
-        el('div', { class: 'level-sub' },
-          reached
-            ? el('span', { class: 'tag reached', text: '도달 · 현재가가 이 가격 이하' })
-            : `현재가보다 ${pct(-gap)} 아래`));
-    }));
+  function renderLevels(view, cur, thresholds, buy, base) {
+    const s = view.summary;
+    const rows = document.querySelectorAll('.levels .level');
+    thresholds.forEach((t, i) => fillLevel(rows[i], s, cur, t.level));
+
+    const buyRow = rows[3];
+    buyRow.querySelector('[data-role="tag"]').textContent = buy ? pct(buy.level / 100, 0) : '';
+    if (buy) fillLevel(buyRow, s, cur, buy.level / 100, `회복률 ${pct(buy.cum_pct)}`);
+
+    const raw = state.raw;
+    const typeName = TYPE_NAMES[raw.type] || raw.type || '이 종목';
+    const preset = LOW_BASE_TYPES.has(raw.type) ? 80 : 90;
+    const why = '회복률이 이 값을 처음 넘는 구간이에요.';
+    $('base-hint').textContent = !state.baseTouched || Math.round(base * 100) === preset
+      ? `${why} ${typeName} 기본값(ETF·지수 80%, 개별 종목 90%)이에요.`
+      : `${why} ${typeName} 기본값은 ${preset}%예요.`;
   }
 
   /* ---------- 차트 ---------- */
 
   function timeTicks(min, max, width) {
     const years = (max - min) / (365.25 * 864e5);
-    const maxTicks = Math.max(2, Math.floor(width / 64));
+    const maxTicks = clamp(Math.floor(width / 90), 3, 8);
     const ticks = [];
     if (years >= 2) {
       const step = [1, 2, 5, 10, 20, 25, 50].find((st) => years / st <= maxTicks) || 50;
@@ -447,46 +476,27 @@
     return { ticks, mode: 'month' };
   }
 
-  function roundRect(ctx, x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-  }
+  const overlaps = (a, b) => !(a.right < b.left - 4 || a.left > b.right + 4 || a.bottom < b.top || a.top > b.bottom);
 
-  // 글자 뒤에 배경을 깔아 선이나 면 위에서도 읽히게 한다.
-  function drawLabel(ctx, text, x, y, align, colors, weight = 500) {
-    ctx.font = `${weight} 11px ${colors.font}`;
-    const w = ctx.measureText(text).width + 8;
-    const h = 16;
-    const left = align === 'right' ? x - w : x;
-    ctx.fillStyle = colors.labelBg;
-    roundRect(ctx, left, y - h / 2, w, h, 4);
-    ctx.fill();
-    ctx.fillStyle = colors.text2;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, left + 4, y + 0.5);
-    return { left, top: y - h / 2, right: left + w, bottom: y + h / 2 };
+  function labelBox(ctx, text, x, y, align) {
+    const w = ctx.measureText(text).width;
+    const left = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
+    return { left, right: left + w, top: y - 13, bottom: y + 2, text, x: left };
   }
-
-  const overlaps = (a, b) => !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
 
   const overlayPlugin = {
     id: 'overlay',
     afterDatasetsDraw(ch, _args, opts) {
       const { ctx, chartArea: a, scales: { x, y } } = ch;
-      const colors = opts.colors;
+      const c = opts.colors;
       ctx.save();
+      ctx.textBaseline = 'alphabetic';
 
       // 마우스 위치의 세로선
       const active = ch.tooltip && ch.tooltip.getActiveElements();
       if (active && active.length) {
         const px = Math.round(active[0].element.x) + 0.5;
-        ctx.strokeStyle = colors.axis;
+        ctx.strokeStyle = c.control;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(px, a.top);
@@ -494,48 +504,56 @@
         ctx.stroke();
       }
 
-      // 기준선
+      // 기준선: 1px 점선, 이름은 오른쪽 끝 위에 (겹치면 뒤의 것은 생략 — 매수 기준가 카드에 모두 있다)
+      const placed = [];
       for (const line of opts.lines) {
         const py = Math.round(y.getPixelForValue(line.value)) + 0.5;
         if (py < a.top || py > a.bottom) continue;
         ctx.strokeStyle = line.color;
-        ctx.lineWidth = line.width;
-        ctx.setLineDash(line.dash);
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
         ctx.beginPath();
         ctx.moveTo(a.left, py);
         ctx.lineTo(a.right, py);
         ctx.stroke();
         ctx.setLineDash([]);
-      }
-      // 기준선 이름: 겹치면 뒤의 것을 생략한다(매수 기준가 카드에 모두 있다).
-      const placed = [];
-      for (const line of opts.lines) {
-        const py = y.getPixelForValue(line.value);
-        if (py < a.top || py > a.bottom) continue;
-        const ly = py - 10;
-        const weight = line.bold ? 650 : 500;
-        ctx.font = `${weight} 11px ${colors.font}`;
-        const w = ctx.measureText(line.label).width + 8;
-        const box = { left: a.left + 6, right: a.left + 6 + w, top: ly - 8, bottom: ly + 8 };
+        ctx.font = `${line.bold ? 500 : 400} 12px ${c.font}`;
+        const box = labelBox(ctx, line.label, a.right - 2, py - 5, 'right');
         if (box.top < a.top || placed.some((p) => overlaps(p, box))) continue;
-        placed.push(drawLabel(ctx, line.label, a.left + 6, ly, 'left', colors, weight));
+        placed.push(box);
+        ctx.fillStyle = c.surfaceAlpha;
+        ctx.fillRect(box.left - 3, box.top - 1, box.right - box.left + 6, box.bottom - box.top + 2);
+        ctx.fillStyle = line.bold ? c.text : c.faint;
+        ctx.fillText(line.label, box.left, py - 5);
       }
 
-      // 현재 위치 점
-      const last = opts.last;
-      if (last) {
-        const px = x.getPixelForValue(last.x);
-        const py = y.getPixelForValue(last.y);
+      // 주석: 위쪽 줄에 이름, 점까지 1px 지시선 (현재, 최대 하락)
+      const notes = [];
+      for (const n of opts.notes) {
+        const px = x.getPixelForValue(n.x);
+        const py = y.getPixelForValue(n.y);
+        ctx.font = `500 12px ${c.font}`;
+        const w = ctx.measureText(n.label).width;
+        let left = px - w / 2;
+        left = clamp(left, a.left, a.right - w);
+        const box = { left, right: left + w, top: a.top - 22, bottom: a.top - 8 };
+        if (notes.some((p) => overlaps(p, box))) continue;
+        notes.push(box);
+        ctx.strokeStyle = c.text;
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.arc(px, py, 6, 0, Math.PI * 2);
-        ctx.fillStyle = colors.surface;
-        ctx.fill();
+        ctx.moveTo(Math.round(px) + 0.5, a.top - 6);
+        ctx.lineTo(Math.round(px) + 0.5, py - 5);
+        ctx.stroke();
         ctx.beginPath();
-        ctx.arc(px, py, 4, 0, Math.PI * 2);
-        ctx.fillStyle = colors.series;
+        ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = n.hue ? c.hue : c.text;
         ctx.fill();
-        const ly = py - 18 > a.top + 8 ? py - 18 : py + 18;
-        drawLabel(ctx, `현재 ${last.label}`, px - 4, ly, 'right', colors, 650);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = c.surface;
+        ctx.stroke();
+        ctx.fillStyle = c.text;
+        ctx.fillText(n.label, left, a.top - 11);
       }
       ctx.restore();
     },
@@ -549,52 +567,43 @@
   }
 
   function renderChart(view, cur, thresholds, buy) {
-    $('chart-sub').textContent =
-      `${fmtDay(view.summary.first_day)} ~ ${fmtDay(view.summary.last_day)} · ${CURRENCY_NAMES[cur] || cur} 기준 · 일별 종가`;
+    const s = view.summary;
+    $('chart-sub').textContent = `${fmtDay(s.first_day)} ~ ${fmtDay(s.last_day)} · 일별 종가`;
 
     const box = $('chart-box');
     if (typeof Chart === 'undefined') {
-      box.replaceChildren(el('p', { class: 'sub', text: '차트 라이브러리를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.' }));
+      box.replaceChildren(el('p', { class: 'meta', text: '차트를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.' }));
       return;
     }
-    const s = view.series;
-    const n = s.days.length;
+    const sr = view.series;
+    const n = sr.days.length;
     const pts = new Array(n);
-    for (let i = 0; i < n; i++) pts[i] = { x: s.days[i] * 864e5, y: s.dd[i] * 100, c: s.close[i] };
+    for (let i = 0; i < n; i++) pts[i] = { x: sr.days[i] * 864e5, y: sr.dd[i] * 100, c: sr.close[i] };
 
-    const colors = {
-      font: css('--font'),
-      series: css('--series-1'),
-      accent: css('--accent'),
-      axis: css('--axis'),
-      grid: css('--grid'),
-      muted: css('--text-muted'),
-      text1: css('--text-primary'),
-      text2: css('--text-secondary'),
-      surface: css('--surface-1'),
+    const c = {
+      font: css('--font'), hue: css('--hue'), hueFill: css('--hue-fill'), text: css('--text'),
+      muted: css('--muted'), faint: css('--faint'), grid: css('--grid'), control: css('--control'),
+      surface: css('--surface'), border: css('--border'),
     };
-    colors.labelBg = hexToRgba(colors.surface, 0.88);
+    c.surfaceAlpha = hexToRgba(c.surface, 0.9);
 
-    const minThreshold = Math.min(...thresholds.map((t) => t.level)) * 100;
-    const ymin = Math.max(-100, Math.min(
-      -10,
-      Math.floor((view.summary.mdd * 100 - 3) / 10) * 10,
-      Math.floor((minThreshold - 5) / 10) * 10,
-    ));
+    // y 눈금: 둥근 간격 4~7개, 맨 아래 눈금은 가장 깊은 값(최대 하락·기준선)보다 아래
+    const deepest = Math.min(s.mdd * 100, ...thresholds.map((t) => t.level * 100), buy ? buy.level : 0);
+    const step = deepest < -60 ? 20 : deepest < -30 ? 10 : 5;
+    const ymin = Math.max(-100, Math.floor((deepest - step * 0.25) / step) * step);
 
     const lines = [];
-    if (buy) {
-      lines.push({ value: buy.level, label: `저점매수 ${buy.level}%`, color: colors.accent, width: 1.5, dash: [6, 4], bold: true });
-    }
-    for (const t of thresholds) {
-      lines.push({ value: t.level * 100, label: `${t.name} ${pct(t.level, 0)}`, color: colors.muted, width: 1, dash: [3, 4], bold: false });
-    }
+    if (buy) lines.push({ value: buy.level, label: `저점매수 ${pct(buy.level / 100, 0)}`, color: c.text, bold: true });
+    for (const t of thresholds) lines.push({ value: t.level * 100, label: `${t.name} ${pct(t.level, 0)}`, color: c.faint });
 
-    const lastPt = pts[n - 1];
+    // 주석: 현재 위치, 최대 하락 지점
+    const mddI = sr.days.indexOf(s.mdd_day);
+    const notes = [{ x: pts[n - 1].x, y: pts[n - 1].y, label: `현재 ${pct(s.current_dd)}`, hue: true }];
+    if (mddI >= 0 && mddI !== n - 1) notes.push({ x: pts[mddI].x, y: pts[mddI].y, label: `최대 하락 ${pct(s.mdd)} · ${fmtDay(s.mdd_day).slice(0, 7)}` });
+
     let tickMode = 'year';
-
-    Chart.defaults.font.family = colors.font;
-    Chart.defaults.font.size = 11;
+    Chart.defaults.font.family = c.font;
+    Chart.defaults.font.size = 12;
 
     if (chart) chart.destroy();
     chart = new Chart($('chart'), {
@@ -602,16 +611,16 @@
       data: {
         datasets: [{
           data: pts,
-          borderColor: colors.series,
+          borderColor: c.hue,
           borderWidth: 1.5,
-          backgroundColor: hexToRgba(colors.series, 0.14),
+          backgroundColor: c.hueFill,
           fill: 'origin',
           pointRadius: 0,
           pointHitRadius: 0,
           pointHoverRadius: 4,
           pointHoverBorderWidth: 2,
-          pointHoverBorderColor: colors.surface,
-          pointHoverBackgroundColor: colors.series,
+          pointHoverBorderColor: c.surface,
+          pointHoverBackgroundColor: c.hue,
           tension: 0,
         }],
       },
@@ -621,26 +630,26 @@
         parsing: false,
         normalized: true,
         interaction: { mode: 'nearest', axis: 'x', intersect: false },
-        layout: { padding: { top: 6, right: 8 } },
+        layout: { padding: { top: 26, right: 4 } },
         plugins: {
           legend: { display: false },
           decimation: { enabled: true, algorithm: 'min-max' },
-          overlay: { lines, colors, last: { x: lastPt.x, y: lastPt.y, label: pct(lastPt.y / 100) } },
+          overlay: { lines, notes, colors: c },
           tooltip: {
             displayColors: false,
-            backgroundColor: colors.surface,
-            borderColor: colors.axis,
+            backgroundColor: c.surface,
+            borderColor: c.border,
             borderWidth: 1,
-            titleColor: colors.text2,
-            titleFont: { weight: '500', size: 11 },
-            bodyColor: colors.text1,
-            bodyFont: { weight: '600', size: 12 },
-            padding: 10,
-            cornerRadius: 8,
+            titleColor: c.muted,
+            titleFont: { weight: '400', size: 12 },
+            bodyColor: c.text,
+            bodyFont: { weight: '500', size: 13 },
+            padding: 8,
+            cornerRadius: 6,
             caretSize: 0,
             callbacks: {
               title: (items) => fmtDay(Math.round(items[0].raw.x / 864e5)),
-              label: (item) => [`${pct(item.raw.y / 100)}  고점 대비`, `${money(item.raw.c, cur)}  종가`],
+              label: (item) => [`고점 대비 ${pct(item.raw.y / 100)}`, `종가 ${money(item.raw.c, cur)}`],
             },
           },
         },
@@ -648,16 +657,16 @@
           x: {
             type: 'linear',
             min: pts[0].x,
-            max: lastPt.x,
+            max: pts[n - 1].x,
             grid: { display: false },
-            border: { color: colors.axis },
+            border: { display: false },
             afterBuildTicks: (axis) => {
-              const res = timeTicks(axis.min, axis.max, axis.width || 800);
+              const res = timeTicks(axis.min, axis.max, axis.width || 700);
               tickMode = res.mode;
               axis.ticks = res.ticks;
             },
             ticks: {
-              color: colors.muted,
+              color: c.faint,
               maxRotation: 0,
               autoSkip: false,
               callback: (v) => {
@@ -670,13 +679,17 @@
           y: {
             min: ymin,
             max: 0,
-            grid: { color: colors.grid, drawTicks: false },
+            grid: {
+              // 0%(최고가) 선이 기준선이라 한 단계 진하게
+              color: (ctx) => (ctx.tick && ctx.tick.value === 0 ? c.control : c.grid),
+              drawTicks: false,
+            },
             border: { display: false },
             ticks: {
-              color: colors.muted,
+              color: c.faint,
               padding: 8,
-              stepSize: -ymin > 50 ? 10 : 5,
-              callback: (v) => `${v}%`,
+              stepSize: step,
+              callback: (v) => pct(v / 100, 0),
             },
           },
         },
@@ -687,81 +700,83 @@
 
   /* ---------- 표 ---------- */
 
-  function tag(text, dotClass) {
-    return el('span', { class: 'tag' }, el('span', { class: `dot ${dotClass}`, 'aria-hidden': 'true' }), text);
+  function pill(text, ink) {
+    return el('span', { class: ink ? 'pill ink' : 'pill', text });
   }
 
-  function renderDistribution(view, base, buy) {
+  // 하락 사다리: 5% 구간마다 가격·회복률·머문 날. 최대 하락보다 깊은 구간은 한 줄로 줄인다.
+  function renderLadder(view, cur, base, buy) {
     const rows = view.distribution;
     const s = view.summary;
     const current = rows.find((r) => s.current_dd >= r.level / 100 - MDD.EPS);
     const firstFull = rows.findIndex((r) => r.cum_pct >= 1 - 1e-12);
-    const maxBucket = Math.max(...rows.map((r) => r.bucket_pct), 1e-9);
+    const shown = rows.slice(0, firstFull >= 0 ? firstFull + 1 : rows.length);
 
     const head = el('thead', {}, el('tr', {},
-      el('th', { text: '구간' }),
+      el('th', { text: '고점 대비' }),
+      el('th', { text: '가격' }),
       el('th', { text: '회복률' }),
       el('th', { text: '조건일' }),
       el('th', { text: '구간 일수' }),
       el('th', { text: '비중' })));
 
-    const body = el('tbody', {}, rows.map((r, i) => {
+    const body = el('tbody', {}, shown.map((r) => {
       const isBuy = buy && r.level === buy.level;
       const isCurrent = current && r.level === current.level;
-      const beyondMdd = firstFull >= 0 && i > firstFull;
-      const classes = [isBuy ? 'buy' : '', !isBuy && isCurrent ? 'current' : '', beyondMdd ? 'muted' : '']
-        .filter(Boolean).join(' ');
-      const tags = [];
-      if (isBuy) tags.push(tag('저점매수', 'accent'));
-      if (isCurrent) tags.push(tag(`현재 ${pct(s.current_dd)}`, 'series'));
-
-      return el('tr', { class: classes || null },
-        el('td', {}, r.level === 0 ? '0% 최고가' : `${r.level}%`,
-          tags.length ? el('span', { class: 'tags' }, tags) : null),
+      const cls = [isBuy ? 'buy' : '', isCurrent ? 'current' : ''].filter(Boolean).join(' ');
+      return el('tr', { class: cls || null },
+        el('td', {}, r.level === 0 ? '0% 최고가' : pct(r.level / 100, 0),
+          isCurrent ? pill(`현재 ${pct(s.current_dd)}`) : null,
+          isBuy ? pill('저점매수', true) : null),
+        el('td', { text: money(s.ath * (1 + r.level / 100), cur) }),
         el('td', {},
           el('span', { class: 'meter', 'aria-hidden': 'true' },
             el('span', { style: { width: `${r.cum_pct * 100}%` } }),
-            el('i', { style: { left: `calc(${base * 100}% - 1px)` } })),
+            el('i', { style: { left: `${base * 100}%` } })),
           pct(r.cum_pct)),
         el('td', { text: int(r.days) }),
-        el('td', { text: int(r.bucket_days) }),
-        el('td', {},
-          el('span', { class: 'bar', 'aria-hidden': 'true', style: { width: `${(r.bucket_pct / maxBucket) * 32}px` } }),
-          pct(r.bucket_pct)));
+        el('td', { class: r.bucket_days ? null : 'quiet', text: int(r.bucket_days) }),
+        el('td', { class: r.bucket_days ? null : 'quiet', text: pct(r.bucket_pct) }));
     }));
 
     $('dist').replaceChildren(head, body);
+    const last = shown[shown.length - 1];
+    $('dist-note').textContent = last && last.level > -100
+      ? `${pct(last.level / 100, 0)}보다 깊이 빠진 날은 없었어요. 최대 하락은 ${pct(s.mdd)}예요.`
+      : '';
+    return shown.length;
   }
 
-  function renderEpisodes(view) {
-    const list = view.episodes.filter((e) => e.depth <= EPISODE_MIN_DEPTH + 1e-12).reverse();
+  function renderEpisodes(view, ladderRows) {
+    const all = view.episodes.filter((e) => e.depth <= EPISODE_MIN_DEPTH + 1e-12).reverse();
     const mdd = view.summary.mdd;
+    // 옆의 하락 사다리와 높이가 맞도록 줄 수를 맞춘다
+    const cap = Math.max(4, ladderRows - 2);
+    const list = state.showAllEpisodes ? all : all.slice(0, cap);
 
     const head = el('thead', {}, el('tr', {},
-      el('th', { text: '고점' }),
-      el('th', { text: '저점' }),
+      el('th', { text: '고점 → 저점' }),
       el('th', { text: '하락률' }),
       el('th', { text: '하락 기간' }),
-      el('th', { text: '회복' }),
-      el('th', { text: '회복 기간' }),
-      el('th', { text: '전체 기간' })));
+      el('th', { text: '회복 기간' })));
 
     const body = el('tbody', {}, list.length
-      ? list.map((e) => el('tr', {},
-        el('td', { text: fmtDay(e.peak_day) }),
-        el('td', { text: fmtDay(e.trough_day) }),
+      ? list.map((e) => el('tr', { title: e.recovered ? `${fmtDay(e.recovery_day)} 회복 · 전체 ${span(e.calendar_days)}` : '아직 회복 중' },
+        el('td', { text: `${fmtDay(e.peak_day)} → ${fmtDay(e.trough_day)}` }),
         el('td', {}, Math.abs(e.depth - mdd) < 1e-12 ? el('strong', { text: pct(e.depth) }) : pct(e.depth)),
         el('td', { text: span(e.trough_day - e.peak_day) }),
-        el('td', {}, e.recovered ? fmtDay(e.recovery_day) : tag('회복 중', 'series')),
-        el('td', { text: e.recovered ? span(e.recovery_day - e.trough_day) : '–' }),
-        el('td', { text: e.recovered ? span(e.calendar_days) : `${span(e.calendar_days)}+` })))
-      : el('tr', {}, el('td', { colspan: '7', text: '조회 기간에 10% 넘게 빠진 적이 없어요.' })));
-
+        el('td', {}, e.recovered ? span(e.recovery_day - e.trough_day) : pill('회복 중'))))
+      : el('tr', { class: 'empty-row' }, el('td', { colspan: '4', text: '조회 기간에 10% 넘게 빠진 적이 없어요.' })));
     $('episodes').replaceChildren(head, body);
+
+    const more = $('episodes-more');
+    more.hidden = all.length <= cap;
+    more.textContent = state.showAllEpisodes ? '접기' : `모두 보기 (${all.length}개)`;
   }
 
   function renderYearly(view, cur) {
-    const rows = [...view.yearly].reverse();
+    const all = [...view.yearly].reverse();
+    const list = state.showAllYears ? all : all.slice(0, YEARLY_CAP);
     const lastIso = MDD.dayToISO(view.summary.last_day);
     const firstIso = MDD.dayToISO(view.summary.first_day);
     const head = el('thead', {}, el('tr', {},
@@ -770,26 +785,75 @@
       el('th', { text: '연간 수익률' }),
       el('th', { text: '연중 최대 하락' }),
       el('th', { text: '연말 하락률' })));
-    const body = el('tbody', {}, rows.map((r, i) => {
+    const body = el('tbody', {}, list.map((r) => {
       let label = String(r.year);
-      if (i === 0 && lastIso.slice(5) < '12-24') label += ` (${lastIso.slice(5).replace('-', '.')}까지)`;
+      if (r === all[0] && lastIso.slice(5) < '12-24') label += ` (${lastIso.slice(5).replace('-', '.')}까지)`;
       if (r.partial) label += ` (${firstIso.slice(5).replace('-', '.')}부터)`;
       return el('tr', {},
         el('td', { text: label }),
         el('td', { text: money(r.close, cur) }),
-        el('td', { text: `${r.return > 0 ? '+' : ''}${pct(r.return)}` }),
+        el('td', { text: signedPct(r.return) }),
         el('td', { text: pct(r.min_dd) }),
-        el('td', { text: pct(r.end_dd) }));
+        el('td', { class: r.end_dd > -0.0005 ? 'quiet' : null, text: pct(r.end_dd) }));
     }));
     $('yearly').replaceChildren(head, body);
+
+    const more = $('yearly-more');
+    more.hidden = all.length <= YEARLY_CAP;
+    more.textContent = state.showAllYears ? '접기' : `모두 보기 (${all.length}년)`;
+  }
+
+  /* ---------- 종목 목록 ---------- */
+
+  function ddFor(e) {
+    const v = MODE === 'static' ? e.dd : state.ddByCode[norm(e.code)];
+    return v == null ? '–' : pct(v);
+  }
+
+  function renderWatchlist() {
+    $('watchlist').replaceChildren(...entries().map((e) =>
+      el('a', { class: 'watch', href: `?q=${encodeURIComponent(e.code)}`, 'data-code': e.code, title: e.name || null },
+        el('span', { class: 'watch-name', text: e.label || e.code }),
+        el('span', { class: 'watch-dd', text: ddFor(e) }))));
+    $('ticker-list').replaceChildren(...entries().map((e) =>
+      el('option', { value: e.code, label: e.label || e.name || e.code })));
+    filterWatchlist();
+    markWatch();
+  }
+
+  function markWatch() {
+    const current = norm(state.code);
+    for (const a of $('watchlist').querySelectorAll('.watch')) {
+      if (norm(a.dataset.code) === current) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
+    }
+  }
+
+  // 검색창에 입력하면 목록을 거른다 (코드·이름·한글 이름)
+  function filterWatchlist() {
+    const q = norm($('q').value);
+    const list = entries();
+    for (const a of $('watchlist').querySelectorAll('.watch')) {
+      const e = list.find((x) => x.code === a.dataset.code);
+      a.hidden = !!q && !(e && [e.code, e.symbol, e.label, e.name].some((v) => v && norm(v).includes(q)));
+    }
+  }
+
+  function openSheet(open) {
+    document.body.classList.toggle('sheet-open', open);
+    $('menu-toggle').setAttribute('aria-expanded', String(open));
+    if (open) $('q').focus();
   }
 
   /* ---------- 조회 조건 ---------- */
 
   function markPreset() {
-    for (const b of $('presets').querySelectorAll('button')) {
+    for (const b of $('presets').querySelectorAll('button[data-years]')) {
       b.setAttribute('aria-pressed', String(Number(b.dataset.years) === state.preset));
     }
+    const open = document.body.classList.contains('dates-open');
+    $('custom-range').setAttribute('aria-pressed', String(state.preset == null || open));
+    $('custom-range').setAttribute('aria-expanded', String(open));
   }
 
   function applyPreset(years) {
@@ -805,36 +869,57 @@
     markPreset();
   }
 
-  function fillTickerChoices() {
-    const list = MODE === 'api' ? API_EXAMPLES : state.catalog.tickers;
-    $('examples').replaceChildren(...list.map((e) =>
-      el('button', { type: 'button', 'data-q': e.code, title: e.name || null, text: e.label || e.code })));
-    $('ticker-list').replaceChildren(...list.map((e) =>
-      el('option', { value: e.code, label: e.label || e.name || e.code })));
-
+  function updateDataInfo() {
     if (MODE === 'static') {
       const updated = new Date(state.catalog.generated_at);
-      $('data-info').textContent = `이 사이트에서 볼 수 있는 종목 ${state.catalog.tickers.length}개 · 데이터 갱신 ${
-        updated.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', dateStyle: 'medium', timeStyle: 'short' })} (한국시간)`;
+      const when = updated.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+      $('data-info').textContent = `${state.catalog.tickers.length}개 종목 · ${when} 갱신`;
     } else {
-      $('data-info').textContent = '로컬 서버 모드: 야후 파이낸스에서 아무 종목이나 바로 조회해요.';
+      $('data-info').textContent = '로컬 서버 · 아무 종목이나 검색';
     }
   }
 
   async function init() {
-    $('examples').addEventListener('click', (e) => {
-      const b = e.target.closest('button');
-      if (!b) return;
-      $('q').value = b.dataset.q;
-      load();
-    });
-    $('controls').addEventListener('submit', (e) => {
+    $('watchlist').addEventListener('click', (e) => {
+      const a = e.target.closest('.watch');
+      if (!a || e.metaKey || e.ctrlKey || e.shiftKey) return;
       e.preventDefault();
-      load();
+      $('q').value = '';
+      filterWatchlist();
+      openSheet(false);
+      load(a.dataset.code);
     });
+    $('search').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const q = $('q').value.trim();
+      if (!q) return;
+      // 목록에서 하나만 남았으면 그 종목을 연다
+      const visible = [...$('watchlist').querySelectorAll('.watch:not([hidden])')];
+      const target = findEntry(q) ? q : (MODE === 'static' && visible.length === 1 ? visible[0].dataset.code : q);
+      $('q').value = '';
+      filterWatchlist();
+      openSheet(false);
+      load(target);
+    });
+    $('q').addEventListener('input', filterWatchlist);
+    $('menu-toggle').addEventListener('click', () => openSheet(true));
+    $('sheet-close').addEventListener('click', () => openSheet(false));
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.body.classList.contains('sheet-open')) openSheet(false);
+    });
+
     $('presets').addEventListener('click', (e) => {
       const b = e.target.closest('button');
       if (!b) return;
+      if (b.id === 'custom-range') {
+        // 휴대폰: 날짜 직접 입력 줄을 펼치거나 접는다
+        const open = !document.body.classList.contains('dates-open');
+        document.body.classList.toggle('dates-open', open);
+        markPreset();
+        if (open) $('start').focus();
+        return;
+      }
+      document.body.classList.remove('dates-open');
       applyPreset(Number(b.dataset.years));
       updateUrl();
       render();
@@ -862,6 +947,14 @@
       state.view = b.dataset.view;
       render();
     });
+    $('episodes-more').addEventListener('click', () => {
+      state.showAllEpisodes = !state.showAllEpisodes;
+      render();
+    });
+    $('yearly-more').addEventListener('click', () => {
+      state.showAllYears = !state.showAllYears;
+      render();
+    });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
 
     const p = new URLSearchParams(location.search);
@@ -874,13 +967,14 @@
     try {
       await loadCatalog();
     } catch (err) {
+      $('name').textContent = 'MDD 분석기';
       setStatus(err.message, 'error');
       return;
     }
-    fillTickerChoices();
-    const first = MODE === 'static' && state.catalog.tickers.length ? state.catalog.tickers[0].code : 'QQQ';
-    $('q').value = p.get('q') || first;
-    load();
+    updateDataInfo();
+    renderWatchlist();
+    const list = entries();
+    load(p.get('q') || (list.length ? list[0].code : 'QQQ'));
   }
 
   init();

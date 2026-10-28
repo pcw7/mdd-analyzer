@@ -79,6 +79,7 @@ def build(tickers: list[dict], out_dir: Path = OUT_DIR, sleep=time.sleep) -> dic
         p = data.payload(symbol, df, meta)
         name = file_name(symbol)
         write_json(out_dir / name, p)
+        last_close = p["close"][-1]
         entries.append(
             {
                 "code": code,
@@ -90,6 +91,9 @@ def build(tickers: list[dict], out_dir: Path = OUT_DIR, sleep=time.sleep) -> dic
                 "file": name,
                 "first": p["d"][0],
                 "last": p["d"][-1],
+                # 종목 목록에 보여줄 요약: 전체 기간 최고가 대비 현재 하락률
+                "last_close": last_close,
+                "dd": round(last_close / max(p["close"]) - 1, 6),
             }
         )
         if p["currency"] and p["currency"] != "KRW":

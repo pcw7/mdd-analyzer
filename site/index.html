@@ -5,136 +5,194 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MDD 분석기</title>
   <meta name="description" content="고점 대비 하락률(MDD)과 하락률 분포로 지금 위치와 저점매수 구간을 확인하는 개인 참고용 도구">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script src="mode.js"></script>
   <script src="mdd.js"></script>
 </head>
 <body>
-  <div class="page">
-    <header class="masthead">
-      <h1>MDD 분석기</h1>
-      <p>고점 대비 하락률로 지금 위치와 저점매수 구간을 확인해요.</p>
+  <div class="app">
+    <!-- 종목 목록: 화면에서 가장 자주 하는 일(종목 바꾸기)이 한 번에 닿는 곳 -->
+    <aside class="sidebar" id="sidebar" aria-label="종목">
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 5h18" class="mark-ath"/>
+          <path d="M3 5h3l6 13 7-13h2" class="mark-curve"/>
+        </svg>
+        <span class="brand-name">MDD 분석기</span>
+        <button type="button" class="sheet-close" id="sheet-close" aria-label="종목 목록 닫기">닫기</button>
+      </div>
+      <p class="scope" id="data-info"></p>
+
+      <form id="search" class="search" role="search" autocomplete="off">
+        <label class="visually-hidden" for="q">종목 검색</label>
+        <input id="q" name="q" list="ticker-list" placeholder="종목 검색 · QQQ, 005930" spellcheck="false">
+        <datalist id="ticker-list"></datalist>
+      </form>
+
+      <div class="group-label"><span>종목</span><span>고점 대비</span></div>
+      <nav class="watchlist" id="watchlist" aria-label="종목 목록"></nav>
+
+      <div class="sidebar-foot">
+        <p>개인 참고용 비상업 도구예요. 투자 권유가 아니에요.</p>
+        <a href="https://github.com/pcw7/mdd-analyzer">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- 휴대폰: 사이드바는 접히고 이 줄만 남는다 -->
+    <header class="phonebar">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M3 5h18" class="mark-ath"/>
+        <path d="M3 5h3l6 13 7-13h2" class="mark-curve"/>
+      </svg>
+      <span class="brand-name">MDD 분석기</span>
+      <button type="button" class="btn" id="menu-toggle" aria-controls="sidebar" aria-expanded="false">종목 목록</button>
     </header>
 
-    <form id="controls" class="controls" autocomplete="off">
-      <div class="field field-ticker">
-        <label for="q">종목코드</label>
-        <div class="ticker-row">
-          <input id="q" name="q" list="ticker-list" placeholder="QQQ, 005930, BTCUSD" spellcheck="false" required>
-          <datalist id="ticker-list"></datalist>
-          <button type="submit" class="btn-primary">조회</button>
+    <main class="canvas">
+      <div class="title-row">
+        <div class="title-text">
+          <h1 id="name">불러오는 중</h1>
+          <p class="finding" id="finding"></p>
+          <p class="stamp" id="symbol-meta"></p>
         </div>
-        <div class="chips" id="examples" aria-label="종목 목록"></div>
       </div>
 
-      <div class="field">
-        <span class="label" id="period-label">기간</span>
-        <div class="segmented" id="presets" role="group" aria-labelledby="period-label">
+      <div class="filters" id="filters">
+        <div class="segmented" id="presets" role="group" aria-label="기간">
           <button type="button" data-years="0">전체</button>
           <button type="button" data-years="20">20년</button>
           <button type="button" data-years="10">10년</button>
           <button type="button" data-years="5">5년</button>
+          <button type="button" class="phone-only" id="custom-range" aria-expanded="false">직접</button>
         </div>
         <div class="dates">
           <input type="date" id="start" aria-label="시작일">
           <span aria-hidden="true">~</span>
           <input type="date" id="end" aria-label="종료일">
         </div>
-      </div>
-
-      <div class="field">
-        <label for="base">저점매수 회복률 기준</label>
-        <div class="inline">
-          <input id="base" type="number" min="1" max="100" step="1" value="80">
-          <span class="unit">%</span>
-        </div>
-        <small class="hint" id="base-hint">ETF·지수 80%, 개별종목 90%</small>
-      </div>
-
-      <div class="field">
-        <span class="label" id="th-label">매수 기준 (고점 대비)</span>
-        <div class="inline thresholds" role="group" aria-labelledby="th-label">
-          <input id="t1" type="number" max="0" min="-99" step="1" value="-15" aria-label="기준1">
-          <input id="t2" type="number" max="0" min="-99" step="1" value="-20" aria-label="기준2">
-          <input id="t3" type="number" max="0" min="-99" step="1" value="-35" aria-label="기준3">
-          <span class="unit">%</span>
-        </div>
-      </div>
-
-      <div class="field">
-        <span class="label">옵션</span>
-        <label class="check"><input type="checkbox" id="adjusted"> 배당 반영 (수정주가)</label>
         <div class="segmented" id="currency" role="group" aria-label="통화 기준" hidden>
           <button type="button" data-view="native" id="currency-native">달러</button>
           <button type="button" data-view="krw">원화</button>
         </div>
-      </div>
-    </form>
-
-    <p class="data-info" id="data-info"></p>
-    <p id="status" class="status" role="status" aria-live="polite"></p>
-
-    <main id="result" hidden>
-      <section class="headline">
-        <div class="title-row">
-          <h2 id="name"></h2>
-          <span class="meta" id="symbol-meta"></span>
-        </div>
-        <div class="hero">
-          <div class="hero-label">고점 대비 현재</div>
-          <div class="hero-value" id="hero"></div>
-          <p class="hero-text" id="hero-text"></p>
-        </div>
-        <p class="note" id="krw-note" hidden></p>
-      </section>
-
-      <section class="tiles" id="tiles" aria-label="요약"></section>
-
-      <section class="card">
-        <div class="card-head">
-          <h3>매수 기준가</h3>
-          <p class="sub">과거 최고가에서 각 기준만큼 빠진 가격이에요.</p>
-        </div>
-        <div class="levels" id="levels"></div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h3>고점 대비 하락률</h3>
-          <p class="sub" id="chart-sub"></p>
-        </div>
-        <div class="chart-box" id="chart-box"><canvas id="chart" role="img" aria-label="고점 대비 하락률 차트. 같은 내용을 아래 연도별 요약 표에서도 볼 수 있어요."></canvas></div>
-      </section>
-
-      <div class="grid-2">
-        <section class="card">
-          <div class="card-head">
-            <h3>하락률 분포</h3>
-            <p class="sub">회복률 = 하락폭이 그 구간보다 얕았던 날의 비율. 회복률이 기준을 처음 넘는 구간이 저점매수 구간이에요.</p>
-          </div>
-          <div class="table-scroll"><table class="table" id="dist"></table></div>
-        </section>
-
-        <section class="card">
-          <div class="card-head">
-            <h3>하락장 기록</h3>
-            <p class="sub">고점 대비 10% 넘게 빠졌던 구간 (최근 순)</p>
-          </div>
-          <div class="table-scroll"><table class="table" id="episodes"></table></div>
-        </section>
+        <label class="check"><input type="checkbox" id="adjusted"> 배당 반영</label>
       </div>
 
-      <details class="card yearly">
-        <summary>연도별 요약</summary>
-        <div class="table-scroll"><table class="table" id="yearly"></table></div>
-      </details>
+      <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+
+      <div id="result" hidden>
+        <section class="kpis" id="kpis" aria-label="요약"></section>
+
+        <!-- 12열 격자, 간격 12px: 8열 + 4열 = 7열 + 5열 = 12열이라 모든 줄이 같은 좌우 끝선에 닿는다 -->
+        <div class="grid">
+          <section class="panel span-8 chart-panel">
+            <header class="panel-head">
+              <h2>고점 대비 하락률</h2>
+              <span class="meta" id="chart-sub"></span>
+            </header>
+            <div class="chart-box" id="chart-box">
+              <canvas id="chart" role="img" aria-label="고점 대비 하락률 차트. 같은 내용을 아래 연도별 요약 표에서도 볼 수 있어요."></canvas>
+            </div>
+          </section>
+
+          <section class="panel span-4 levels-panel">
+            <header class="panel-head">
+              <h2>매수 기준가</h2>
+              <span class="meta">과거 최고가 기준</span>
+            </header>
+            <div class="levels">
+              <div class="level" data-kind="t">
+                <div class="level-line">
+                  <label class="level-name" for="t1">기준1 <input id="t1" type="number" min="-99" max="0" step="1" value="-15"><span class="unit">%</span></label>
+                  <strong class="level-price" data-role="price"></strong>
+                </div>
+                <div class="track" aria-hidden="true"><span data-role="fill"></span></div>
+                <p class="level-sub" data-role="sub"></p>
+              </div>
+              <div class="level" data-kind="t">
+                <div class="level-line">
+                  <label class="level-name" for="t2">기준2 <input id="t2" type="number" min="-99" max="0" step="1" value="-20"><span class="unit">%</span></label>
+                  <strong class="level-price" data-role="price"></strong>
+                </div>
+                <div class="track" aria-hidden="true"><span data-role="fill"></span></div>
+                <p class="level-sub" data-role="sub"></p>
+              </div>
+              <div class="level" data-kind="t">
+                <div class="level-line">
+                  <label class="level-name" for="t3">기준3 <input id="t3" type="number" min="-99" max="0" step="1" value="-35"><span class="unit">%</span></label>
+                  <strong class="level-price" data-role="price"></strong>
+                </div>
+                <div class="track" aria-hidden="true"><span data-role="fill"></span></div>
+                <p class="level-sub" data-role="sub"></p>
+              </div>
+              <div class="level is-buy" data-kind="buy">
+                <div class="level-line">
+                  <span class="level-name">저점매수 <span class="level-tag" data-role="tag"></span></span>
+                  <strong class="level-price" data-role="price"></strong>
+                </div>
+                <div class="track" aria-hidden="true"><span data-role="fill"></span></div>
+                <p class="level-sub" data-role="sub"></p>
+              </div>
+            </div>
+            <div class="panel-foot">
+              <label for="base">저점매수 기준 회복률 <input id="base" type="number" min="1" max="100" step="1" value="80">%</label>
+              <p class="hint" id="base-hint"></p>
+            </div>
+          </section>
+
+          <section class="panel span-7">
+            <header class="panel-head">
+              <h2>하락 사다리</h2>
+              <span class="meta">5% 구간마다 그 가격과 머문 날</span>
+            </header>
+            <div class="table-wrap"><table class="table" id="dist"></table></div>
+            <p class="panel-note" id="dist-note"></p>
+          </section>
+
+          <section class="panel span-5">
+            <header class="panel-head">
+              <h2>하락장 기록</h2>
+              <span class="meta">10% 넘게 빠진 구간 · 최근 순</span>
+            </header>
+            <div class="table-wrap"><table class="table" id="episodes"></table></div>
+            <button type="button" class="card-link" id="episodes-more" hidden></button>
+          </section>
+
+          <section class="panel span-7">
+            <header class="panel-head">
+              <h2>연도별 요약</h2>
+              <span class="meta">최근 순</span>
+            </header>
+            <div class="table-wrap"><table class="table" id="yearly"></table></div>
+            <button type="button" class="card-link" id="yearly-more" hidden></button>
+          </section>
+
+          <section class="panel span-5 guide">
+            <header class="panel-head">
+              <h2>읽는 법</h2>
+            </header>
+            <dl>
+              <dt>고점 대비 하락률</dt>
+              <dd>그날까지의 최고 종가에서 몇 % 빠져 있는지예요. 0%면 최고가를 새로 쓴 날이에요.</dd>
+              <dt>회복률</dt>
+              <dd>하락폭이 그 구간보다 얕았던 날의 비율이에요. 예를 들어 −70% 행이 90%면, 거래일의 90%는 −70%보다 덜 빠져 있었다는 뜻이에요.</dd>
+              <dt>저점매수 구간</dt>
+              <dd>회복률이 기준을 처음 넘는 구간이에요. 기준은 ETF·지수 80%, 개별 종목 90%를 기본으로 써요.</dd>
+              <dt>데이터</dt>
+              <dd>Yahoo Finance의 일별 종가예요. 원화 기준은 같은 날 환율로 바꾼 값이고, 환율은 2003년 12월부터 있어요.</dd>
+            </dl>
+          </section>
+        </div>
+
+        <footer class="footer">
+          데이터: Yahoo Finance (yfinance), 일별 종가 기준. 개인 참고용 비상업 도구이며 투자 권유가 아니에요.
+          과거의 하락 패턴이 앞으로도 반복된다는 보장은 없어요.
+        </footer>
+      </div>
     </main>
-
-    <footer class="footer">
-      데이터: Yahoo Finance (yfinance), 일별 종가 기준. 개인 참고용 비상업 도구이며 투자 권유가 아니에요.
-      과거의 하락 패턴이 앞으로도 반복된다는 보장은 없어요.
-    </footer>
   </div>
   <script src="app.js"></script>
 </body>
