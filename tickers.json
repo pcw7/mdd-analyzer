@@ -1,0 +1,17 @@
+[
+  { "code": "QQQ" },
+  { "code": "SPY" },
+  { "code": "SOXX" },
+  { "code": "TQQQ" },
+  { "code": "SCHD" },
+  { "code": "AAPL" },
+  { "code": "MSFT" },
+  { "code": "NVDA" },
+  { "code": "TSLA" },
+  { "code": "005930", "label": "삼성전자" },
+  { "code": "000660", "label": "SK하이닉스" },
+  { "code": "KOSPI", "label": "코스피" },
+  { "code": "KOSDAQ", "label": "코스닥" },
+  { "code": "BTCUSD", "label": "비트코인" },
+  { "code": "GCW00", "label": "금" }
+]

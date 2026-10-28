@@ -1,0 +1,60 @@
+name: 사이트 배포
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # 화~토 한국시간 오전 7시 (미국·한국 장 마감 뒤 데이터 갱신)
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 테스트
+        run: |
+          python -m pytest -q
+          node --test "tests/*.test.js"
+
+      - name: 가격 데이터 만들기
+        run: python scripts/build_data.py
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
